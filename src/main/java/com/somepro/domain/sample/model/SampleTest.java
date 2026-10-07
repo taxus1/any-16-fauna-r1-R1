@@ -122,10 +122,20 @@ public class SampleTest extends BaseEntity {
         if (result == null || !TESTED_RESULTS.contains(result.trim())) {
             throw new BizException("检测结果非法，仅支持 POSITIVE/NEGATIVE/INCONCLUSIVE");
         }
-        if (!RESULT_PENDING.equals(this.result)) {
+        if (!pending()) {
             throw new BizException("该样本检测结果已录入，同一条样本不重复录入");
         }
         this.result = result.trim();
         this.testedAt = testedAt != null ? testedAt : LocalDateTime.now();
+    }
+
+    /** 结果还悬着（待检）：只有待检的样本录得了检测结果。 */
+    public boolean pending() {
+        return RESULT_PENDING.equals(this.result);
+    }
+
+    /** 结果是阳性：阳性的才会跟着立疫病预警。 */
+    public boolean positive() {
+        return RESULT_POSITIVE.equals(this.result);
     }
 }

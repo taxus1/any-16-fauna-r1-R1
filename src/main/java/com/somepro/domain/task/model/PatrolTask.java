@@ -21,7 +21,8 @@ import java.util.Set;
  *   已开工/已完成/已取消的都别重复开；
  * - 只有正在执行（IN_PROGRESS）的任务才回报得了完成：回报置 DONE 并记下完成时刻，
  *   同时把这一趟的观测账（总条数、异常条数）归拢写回，此后冻结不再翻动；
- * - 已结束（DONE）/已取消的任务不再收新观测，想补录得另开任务；
+ * - 只有正在执行（IN_PROGRESS）的任务才收新观测：待执行还没开工、已结束账已冻结、
+ *   已取消已销账的都不收，想补录得另开任务（钩子 {@link #acceptsObservation()}）；
  * - 只有还没走完的任务（待执行/执行中）能改资料；已完成是终态，不再改、不再取消；
  * - 「站必须在运行、点必须在册」的校验要查监测站/监测点仓储，由应用层编排，
  *   领域对象只保证自身字段不变量；「同点同日不挂两条未完成任务」同理在应用层校验。
@@ -49,6 +50,9 @@ public class PatrolTask extends BaseEntity {
     public static final String STATUS_CANCELLED = "CANCELLED";
 
     private static final Set<String> TYPES = Set.of(TYPE_ROUTINE, TYPE_SPECIAL, TYPE_EMERGENCY);
+
+    /** 还没走完的任务状态（待执行/执行中）：能改资料、占「同点同日」的位。 */
+    private static final Set<String> UNFINISHED_STATUSES = Set.of(STATUS_PENDING, STATUS_IN_PROGRESS);
 
     private Long id;
 
@@ -127,7 +131,17 @@ public class PatrolTask extends BaseEntity {
 
     /** 还没走完（待执行/执行中）的任务才允许改、才占「同点同日」的位。 */
     public boolean unfinished() {
-        return STATUS_PENDING.equals(this.status) || STATUS_IN_PROGRESS.equals(this.status);
+        return UNFINISHED_STATUSES.contains(this.status);
+    }
+
+    /** 正在执行（IN_PROGRESS）：观测录入唯一认这个状态。 */
+    public boolean ongoing() {
+        return STATUS_IN_PROGRESS.equals(this.status);
+    }
+
+    /** 已取消（销账）：取消任务名下的观测不再收新上报。 */
+    public boolean cancelled() {
+        return STATUS_CANCELLED.equals(this.status);
     }
 
     /**
@@ -213,12 +227,12 @@ public class PatrolTask extends BaseEntity {
     }
 
     /**
-     * 是否还能往里录观测：还没走完（待执行/执行中）的任务才收。
-     * 已完成的任务账已归拢冻结、已取消的已销账，都不再冒新观测，想补录得另开任务
-     * —— 观测录入那边照这个钩子把关，两头保持一致。
+     * 是否还能往里录观测：只有正在执行（IN_PROGRESS）的任务才收。
+     * 待执行还没开工、已完成的任务账已归拢冻结、已取消的已销账，都不再冒新观测，
+     * 想补录得另开任务 —— 观测录入那边照这个钩子把关，两头保持一致。
      */
     public boolean acceptsObservation() {
-        return unfinished();
+        return ongoing();
     }
 
     private static String blankToNull(String value) {

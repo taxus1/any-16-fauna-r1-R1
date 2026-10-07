@@ -170,6 +170,11 @@ public class EpiAlert extends BaseEntity {
         }
     }
 
+    /** 已解除：解除这一步要记 resolved_at，并联动把挂的上报收尾到已结案。 */
+    public boolean resolved() {
+        return STATUS_RESOLVED.equals(this.status);
+    }
+
     /**
      * 预警级别按这单的来头算，照着上报那摊的口径往上接：上报当初判的严重程度定基线
      * （高=2 / 中=1），再叠观测快照上的物种保护级别（国家一级=4 / 国家二级=3 / 省级=2 /

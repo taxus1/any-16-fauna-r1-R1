@@ -147,6 +147,14 @@ public class MonitorStation extends BaseEntity {
         this.status = STATUS_CLOSED;
     }
 
+    /**
+     * 还在运行（ACTIVE）：只有运行中的站能挂点位、接任务。
+     * 停用/关闭的站这两件事都办不了 —— 挂点与派任务共用这一个口径。
+     */
+    public boolean operating() {
+        return STATUS_ACTIVE.equals(this.status);
+    }
+
     private static String blankToNull(String value) {
         if (value == null || value.isBlank()) {
             return null;

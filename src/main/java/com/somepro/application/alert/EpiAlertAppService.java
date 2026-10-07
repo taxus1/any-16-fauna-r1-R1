@@ -1,5 +1,6 @@
 package com.somepro.application.alert;
 
+import com.somepro.application.shared.AdvanceTemplate;
 import com.somepro.common.exception.BizException;
 import com.somepro.domain.alert.model.EpiAlert;
 import com.somepro.domain.alert.repository.EpiAlertRepository;
@@ -17,7 +18,7 @@ import java.time.LocalDateTime;
  *
  * 状态机只顺不逆（已发布→处置中→已解除→已归档，不跳级、不回退，归档为终态）由领域对象把守；
  * 并发推同一条由仓储层条件更新兜底，只有一下翻得动。解除这一步挂的上报跟着收尾到已结案，
- * 由仓储层在推进事务里联动。
+ * 由仓储层在推进事务里联动。推进编排放进 {@link AdvanceTemplate}，与异常上报共用同一套形状。
  */
 @Service
 public class EpiAlertAppService {
@@ -36,17 +37,14 @@ public class EpiAlertAppService {
      */
     public Mono<EpiAlert> advance(Long id, String targetStatus, String disposalMethod,
                                   LocalDateTime resolvedAt) {
-        return alertRepository.findById(id)
-                .switchIfEmpty(Mono.error(new BizException("预警不存在")))
-                .flatMap(alert -> {
-                    String fromStatus = alert.getStatus();
-                    alert.advance(targetStatus, disposalMethod, resolvedAt);
-                    return alertRepository.advance(alert, fromStatus)
-                            .flatMap(flipped -> flipped
-                                    // 重查一遍：处置时刻由审计列在落库时刷新，内存里的还是推进前的
-                                    ? alertRepository.findById(alert.getId())
-                                    : Mono.error(new BizException("预警状态已变化，请刷新后重试")));
-                });
+        return AdvanceTemplate.advance(id,
+                alertRepository::findById,
+                "预警不存在",
+                EpiAlert::getStatus,
+                alert -> alert.advance(targetStatus, disposalMethod, resolvedAt),
+                alertRepository::advance,
+                alert -> alertRepository.findById(alert.getId()),
+                "预警状态已变化，请刷新后重试");
     }
 
     /** 查看单条在册预警。 */

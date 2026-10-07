@@ -1,11 +1,10 @@
 package com.somepro.application.site;
 
+import com.somepro.application.shared.guard.StationGuard;
 import com.somepro.common.exception.BizException;
 import com.somepro.domain.shared.model.PageResult;
 import com.somepro.domain.site.model.MonitorSite;
 import com.somepro.domain.site.repository.MonitorSiteRepository;
-import com.somepro.domain.station.model.MonitorStation;
-import com.somepro.domain.station.repository.MonitorStationRepository;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Mono;
 
@@ -14,26 +13,24 @@ import reactor.core.publisher.Mono;
  *
  * 挂载规则：点位只能挂到「实实在在存在、且未停用未关闭」的监测站上 ——
  * 登记时校验，改挂载站时同样校验；目标站不存在、已停用、已关闭都直接业务异常。
+ * 这份「站存在且在运行」的取数+判断与派巡护任务共用 {@link StationGuard}，全仓只一处。
  */
 @Service
 public class MonitorSiteAppService {
 
     private final MonitorSiteRepository siteRepository;
-    private final MonitorStationRepository stationRepository;
+    private final StationGuard stationGuard;
 
     public MonitorSiteAppService(MonitorSiteRepository siteRepository,
-                                 MonitorStationRepository stationRepository) {
+                                 StationGuard stationGuard) {
         this.siteRepository = siteRepository;
-        this.stationRepository = stationRepository;
+        this.stationGuard = stationGuard;
     }
 
     /** 登记监测点：默认在册；siteNo 留空时由仓储层生成。 */
     public Mono<MonitorSite> createSite(String siteNo, Long stationId, String siteType,
                                         String habitat, String location) {
-        if (stationId == null) {
-            return Mono.error(new BizException("所属监测站不能为空"));
-        }
-        return requireAttachableStation(stationId)
+        return stationGuard.requireOperating(stationId, "所属监测站不能为空", "所属监测站不存在", "挂载监测点")
                 .flatMap(station -> {
                     MonitorSite site = MonitorSite.create(stationId, siteType, habitat, location);
                     site.setSiteNo(normalizeNo(siteNo));
@@ -51,10 +48,12 @@ public class MonitorSiteAppService {
                 .switchIfEmpty(Mono.error(new BizException("监测点不存在")))
                 .flatMap(site -> {
                     Mono<MonitorSite> validated = (stationId != null && !stationId.equals(site.getStationId()))
-                            ? requireAttachableStation(stationId).map(station -> {
-                                site.attachTo(stationId);
-                                return site;
-                            })
+                            ? stationGuard.requireOperating(stationId, "所属监测站不能为空",
+                                    "所属监测站不存在", "挂载监测点")
+                                    .map(station -> {
+                                        site.attachTo(stationId);
+                                        return site;
+                                    })
                             : Mono.just(site);
                     return validated.flatMap(s -> {
                         s.updateProfile(siteType, habitat, location);
@@ -99,21 +98,6 @@ public class MonitorSiteAppService {
                         site.activate();
                     }
                     return siteRepository.update(site);
-                });
-    }
-
-    /** 挂载校验：站必须存在，且状态为运行（停用/关闭的站不能再挂点位）。 */
-    private Mono<MonitorStation> requireAttachableStation(Long stationId) {
-        return stationRepository.findById(stationId)
-                .switchIfEmpty(Mono.error(new BizException("所属监测站不存在")))
-                .flatMap(station -> {
-                    if (MonitorStation.STATUS_CLOSED.equals(station.getStatus())) {
-                        return Mono.error(new BizException("监测站已关闭，不能挂载监测点"));
-                    }
-                    if (MonitorStation.STATUS_SUSPENDED.equals(station.getStatus())) {
-                        return Mono.error(new BizException("监测站已停用，不能挂载监测点"));
-                    }
-                    return Mono.just(station);
                 });
     }
 

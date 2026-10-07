@@ -134,6 +134,14 @@ public class WildlifeObs extends BaseEntity {
     }
 
     /**
+     * 算不算异常个体：受伤/死亡/疑似疫病（口径统一用 {@link ObsSummary#ABNORMAL_HEALTH}）。
+     * 正常的个体没什么可上报的，完成回报数异常条数也是这个口径。
+     */
+    public boolean abnormal() {
+        return ObsSummary.ABNORMAL_HEALTH.contains(this.healthStatus);
+    }
+
+    /**
      * 改录：传入的字段才改（null 表示不动）。任务归属不开放修改。
      * 换物种（speciesCode 非空）时必须连新物种的保护级别快照一起带来，由应用层验过名录后传入；
      * 不换物种则 protectionLevel 传 null，老快照原样保留。

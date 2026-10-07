@@ -163,6 +163,19 @@ public class AbnormalReport extends BaseEntity {
         this.status = target;
     }
 
+    /** 已结案（终态）：不能再采样、不能再推进。 */
+    public boolean closed() {
+        return STATUS_CLOSED.equals(this.status);
+    }
+
+    /**
+     * 还在办（已上报/处置中）：只有在办的上报能登记样本。
+     * 已救护/已采样的不走采样线，已结案的是终态。
+     */
+    public boolean inHandling() {
+        return STATUS_REPORTED.equals(this.status) || STATUS_HANDLING.equals(this.status);
+    }
+
     /** 类别得跟观测当时的健康状态对得上，串了不收。 */
     private void matchObsHealth(String obsHealthStatus) {
         String expected = HEALTH_TO_CATEGORY.get(obsHealthStatus);

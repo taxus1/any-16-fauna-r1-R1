@@ -125,6 +125,11 @@ public class MonitorSite extends BaseEntity {
         this.status = STATUS_ACTIVE;
     }
 
+    /** 在册（ACTIVE）：只有在册的点能接巡护任务、挂观测。 */
+    public boolean active() {
+        return STATUS_ACTIVE.equals(this.status);
+    }
+
     private static String blankToNull(String value) {
         if (value == null || value.isBlank()) {
             return null;
