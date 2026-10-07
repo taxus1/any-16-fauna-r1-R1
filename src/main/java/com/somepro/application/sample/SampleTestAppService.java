@@ -1,10 +1,9 @@
 package com.somepro.application.sample;
 
 import com.somepro.common.exception.BizException;
-import com.somepro.domain.report.model.AbnormalReport;
-import com.somepro.domain.report.repository.AbnormalReportRepository;
 import com.somepro.domain.sample.model.SampleTest;
 import com.somepro.domain.sample.repository.SampleTestRepository;
+import com.somepro.domain.sample.service.SamplingGuard;
 import com.somepro.domain.shared.model.PageResult;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Mono;
@@ -14,8 +13,7 @@ import java.time.LocalDateTime;
 /**
  * 采样送检与检测应用层：编排采样用例（登记、检测结果回填、查看、条件分页）。
  *
- * 登记一道前置：挂的那条上报得还在办（已上报/处置中）——已结案 CLOSED 的别再采样，
- * 已救护/已采样的也不在在办状态，同样采不了。
+ * 「一份样本能不能登」（上报在册且还在办）的取数与判断统一收在 {@link SamplingGuard}。
  *
  * 结果回填的联动（样本翻结果 + 上报推已采样 + 阳性立预警，一个事务三头一起动）由仓储层落；
  * 「结果只录一次、同一条样本别来回翻」由领域对象拦一道、仓储条件更新兜底。
@@ -25,12 +23,12 @@ import java.time.LocalDateTime;
 public class SampleTestAppService {
 
     private final SampleTestRepository sampleRepository;
-    private final AbnormalReportRepository reportRepository;
+    private final SamplingGuard guard;
 
     public SampleTestAppService(SampleTestRepository sampleRepository,
-                                AbnormalReportRepository reportRepository) {
+                                SamplingGuard guard) {
         this.sampleRepository = sampleRepository;
-        this.reportRepository = reportRepository;
+        this.guard = guard;
     }
 
     /**
@@ -39,7 +37,7 @@ public class SampleTestAppService {
      */
     public Mono<SampleTest> register(Long reportId, String sampleType, LocalDateTime sentAt,
                                      String labName, String testItem) {
-        return requireSamplableReport(reportId)
+        return guard.requireSamplableReport(reportId)
                 .flatMap(report -> {
                     SampleTest sample = SampleTest.create(report.getId(), sampleType, sentAt,
                             labName, testItem);
@@ -71,25 +69,6 @@ public class SampleTestAppService {
                                                     Long reportId, String sampleType, String result) {
         return sampleRepository.page(pageNum, pageSize, reportId,
                 normalize(sampleType), normalize(result));
-    }
-
-    /** 上报得在册且还在办：已结案的别再采样，已救护/已采样的也不在在办状态。 */
-    private Mono<AbnormalReport> requireSamplableReport(Long reportId) {
-        if (reportId == null) {
-            return Mono.error(new BizException("所属上报不能为空"));
-        }
-        return reportRepository.findById(reportId)
-                .switchIfEmpty(Mono.error(new BizException("异常上报不存在或已作废，不能采样")))
-                .flatMap(report -> {
-                    if (AbnormalReport.STATUS_CLOSED.equals(report.getStatus())) {
-                        return Mono.error(new BizException("上报已结案，不能再采样"));
-                    }
-                    if (!AbnormalReport.STATUS_REPORTED.equals(report.getStatus())
-                            && !AbnormalReport.STATUS_HANDLING.equals(report.getStatus())) {
-                        return Mono.error(new BizException("上报已不在在办状态（已救护/已采样），不能再采样"));
-                    }
-                    return Mono.just(report);
-                });
     }
 
     private static String normalize(String value) {

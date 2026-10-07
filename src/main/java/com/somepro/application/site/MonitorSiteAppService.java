@@ -5,34 +5,32 @@ import com.somepro.domain.shared.model.PageResult;
 import com.somepro.domain.site.model.MonitorSite;
 import com.somepro.domain.site.repository.MonitorSiteRepository;
 import com.somepro.domain.station.model.MonitorStation;
-import com.somepro.domain.station.repository.MonitorStationRepository;
+import com.somepro.domain.task.service.PatrolDispatchGuard;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Mono;
 
 /**
  * 监测点应用层：编排监测点用例（登记、改资料、查看、停测/恢复、撤点、名册分页）。
  *
- * 挂载规则：点位只能挂到「实实在在存在、且未停用未关闭」的监测站上 ——
- * 登记时校验，改挂载站时同样校验；目标站不存在、已停用、已关闭都直接业务异常。
+ * 挂载规则：点位只能挂到「实实在在存在、且未停用未关闭」的监测站上 —— 与派任务时
+ * 「站得在运行」是同一条判断、同一次取数，统一走 {@link PatrolDispatchGuard}
+ * （报错文案按挂载场景不同由守卫内部分别给出）；登记与改挂载都调它。
  */
 @Service
 public class MonitorSiteAppService {
 
     private final MonitorSiteRepository siteRepository;
-    private final MonitorStationRepository stationRepository;
+    private final PatrolDispatchGuard dispatchGuard;
 
     public MonitorSiteAppService(MonitorSiteRepository siteRepository,
-                                 MonitorStationRepository stationRepository) {
+                                 PatrolDispatchGuard dispatchGuard) {
         this.siteRepository = siteRepository;
-        this.stationRepository = stationRepository;
+        this.dispatchGuard = dispatchGuard;
     }
 
     /** 登记监测点：默认在册；siteNo 留空时由仓储层生成。 */
     public Mono<MonitorSite> createSite(String siteNo, Long stationId, String siteType,
                                         String habitat, String location) {
-        if (stationId == null) {
-            return Mono.error(new BizException("所属监测站不能为空"));
-        }
         return requireAttachableStation(stationId)
                 .flatMap(station -> {
                     MonitorSite site = MonitorSite.create(stationId, siteType, habitat, location);
@@ -102,19 +100,13 @@ public class MonitorSiteAppService {
                 });
     }
 
-    /** 挂载校验：站必须存在，且状态为运行（停用/关闭的站不能再挂点位）。 */
+    /**
+     * 挂载校验：站必须存在，且在运行（停用/关闭的站不能再挂点位）。
+     * 与派任务共用同一次取数与同一条「站在运行」判断（{@link PatrolDispatchGuard}），
+     * 只是状态不符时的报错文案按挂载场景说。
+     */
     private Mono<MonitorStation> requireAttachableStation(Long stationId) {
-        return stationRepository.findById(stationId)
-                .switchIfEmpty(Mono.error(new BizException("所属监测站不存在")))
-                .flatMap(station -> {
-                    if (MonitorStation.STATUS_CLOSED.equals(station.getStatus())) {
-                        return Mono.error(new BizException("监测站已关闭，不能挂载监测点"));
-                    }
-                    if (MonitorStation.STATUS_SUSPENDED.equals(station.getStatus())) {
-                        return Mono.error(new BizException("监测站已停用，不能挂载监测点"));
-                    }
-                    return Mono.just(station);
-                });
+        return dispatchGuard.requireOperationalStation(stationId, "不能挂载监测点");
     }
 
     private static String normalizeNo(String siteNo) {

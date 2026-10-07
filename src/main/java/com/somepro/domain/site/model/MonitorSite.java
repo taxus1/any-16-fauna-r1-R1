@@ -125,6 +125,14 @@ public class MonitorSite extends BaseEntity {
         this.status = STATUS_ACTIVE;
     }
 
+    /**
+     * 点位是否在册（ACTIVE）：只有在册的点才派得进去任务、挂得上观测。
+     * 停测的点不行 —— 派任务与录观测共用这一个谓词，判断只留一处。
+     */
+    public boolean isActive() {
+        return STATUS_ACTIVE.equals(this.status);
+    }
+
     private static String blankToNull(String value) {
         if (value == null || value.isBlank()) {
             return null;

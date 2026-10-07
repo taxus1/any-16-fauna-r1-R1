@@ -139,6 +139,19 @@ public class AbnormalReport extends BaseEntity {
     }
 
     /**
+     * 上报是否还在办（已上报/处置中）：只有在办的上报才采得了样本。
+     * 已救护/已采样已走出采样线，已结案是终态 —— 样本登记共用这一个谓词，判断只留一处。
+     */
+    public boolean isOngoing() {
+        return STATUS_REPORTED.equals(this.status) || STATUS_HANDLING.equals(this.status);
+    }
+
+    /** 已结案是终态：终态的上报不再收新样本。 */
+    public boolean isClosed() {
+        return STATUS_CLOSED.equals(this.status);
+    }
+
+    /**
      * 处置推进：REPORTED → HANDLING → RESCUED/SAMPLED → CLOSED，只能顺着走，
      * 不能跳级也不能回退；已结案是终态，再推挡回。
      * 推进落库走条件更新（仓储层按原状态卡），处置时刻由审计列 update_time 记下。

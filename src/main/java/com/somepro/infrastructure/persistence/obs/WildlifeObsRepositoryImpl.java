@@ -1,30 +1,28 @@
 package com.somepro.infrastructure.persistence.obs;
 
 import cn.hutool.core.util.IdUtil;
-import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
-import com.github.pagehelper.PageHelper;
 import com.somepro.domain.obs.model.ObsSummary;
 import com.somepro.domain.obs.model.WildlifeObs;
 import com.somepro.domain.obs.repository.WildlifeObsRepository;
 import com.somepro.domain.shared.model.PageResult;
-import com.somepro.infrastructure.config.ReactiveOperatorContext;
-import com.somepro.infrastructure.persistence.audit.AuditContextHolder;
 import com.somepro.infrastructure.persistence.obs.converter.WildlifeObsPoConverter;
 import com.somepro.infrastructure.persistence.obs.po.WildlifeObsPO;
 import com.somepro.infrastructure.persistence.support.BizNoGenerator;
+import com.somepro.infrastructure.persistence.support.BlockingJdbc;
+import com.somepro.infrastructure.persistence.support.Conditions;
+import com.somepro.infrastructure.persistence.support.PagingQuery;
 import org.springframework.stereotype.Repository;
 import reactor.core.publisher.Mono;
-import reactor.core.scheduler.Schedulers;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
-import java.util.List;
-import java.util.function.Supplier;
-import java.util.stream.Collectors;
 
 /**
  * 野生动物观测记录仓储适配器（基础设施层）。
+ *
+ * 只负责观测本身的存取：编号分配、改录、作废、分页与任务观测账汇总。
+ * 阻塞 JDBC 统一走 {@link BlockingJdbc} 桥接、分页统一走 {@link PagingQuery}。
  *
  * 编号分配：obsNo 按 WO-YYYY-NNNNNN 生成（年份按登记当下，序号 6 位零填充），
  * 并发撞号由 {@link BizNoGenerator} 重试，唯一索引兜底，一个号只落一条。
@@ -51,7 +49,7 @@ public class WildlifeObsRepositoryImpl implements WildlifeObsRepository {
 
     @Override
     public Mono<WildlifeObs> create(WildlifeObs obs) {
-        return blocking(() -> {
+        return BlockingJdbc.blocking(() -> {
             String prefix = NO_PREFIX + LocalDate.now().getYear() + "-";
             return BizNoGenerator.insertWithRetry(
                     () -> obsMapper.selectMaxSeq(prefix, prefix.length() + 1),
@@ -63,7 +61,7 @@ public class WildlifeObsRepositoryImpl implements WildlifeObsRepository {
 
     @Override
     public Mono<WildlifeObs> update(WildlifeObs obs) {
-        return blocking(() -> {
+        return BlockingJdbc.blocking(() -> {
             WildlifeObsPO po = WildlifeObsPoConverter.toPo(obs);
             obsMapper.updateById(po);
             return WildlifeObsPoConverter.toDomain(po);
@@ -72,7 +70,7 @@ public class WildlifeObsRepositoryImpl implements WildlifeObsRepository {
 
     @Override
     public Mono<WildlifeObs> findById(Long id) {
-        return blocking(() -> {
+        return BlockingJdbc.blocking(() -> {
             WildlifeObsPO po = obsMapper.selectById(id);
             return po == null ? null : WildlifeObsPoConverter.toDomain(po);
         });
@@ -80,7 +78,7 @@ public class WildlifeObsRepositoryImpl implements WildlifeObsRepository {
 
     @Override
     public Mono<Void> voidObs(Long id) {
-        return blocking(() -> {
+        return BlockingJdbc.blocking(() -> {
             // @TableLogic 把 deleteById 改写成 UPDATE t_wildlife_obs SET del_flag=1
             // WHERE id=? AND del_flag=0：已作废的重复作废不动第二下，底子仍留在表里。
             obsMapper.deleteById(id);
@@ -93,34 +91,21 @@ public class WildlifeObsRepositoryImpl implements WildlifeObsRepository {
                                               Long taskId, Long siteId, String speciesCode,
                                               String healthStatus,
                                               LocalDateTime observedFrom, LocalDateTime observedTo) {
-        return this.<PageResult<WildlifeObs>>blocking(() -> {
-            try {
-                PageHelper.startPage(pageNum, pageSize);
-                LambdaQueryWrapper<WildlifeObsPO> wrapper = Wrappers.<WildlifeObsPO>lambdaQuery()
+        return BlockingJdbc.blocking(() -> PagingQuery.page(pageNum, pageSize,
+                () -> obsMapper.selectList(Wrappers.<WildlifeObsPO>lambdaQuery()
                         .eq(taskId != null, WildlifeObsPO::getTaskId, taskId)
                         .eq(siteId != null, WildlifeObsPO::getSiteId, siteId)
-                        .eq(hasText(speciesCode), WildlifeObsPO::getSpeciesCode, speciesCode)
-                        .eq(hasText(healthStatus), WildlifeObsPO::getHealthStatus, healthStatus)
+                        .eq(Conditions.hasText(speciesCode), WildlifeObsPO::getSpeciesCode, speciesCode)
+                        .eq(Conditions.hasText(healthStatus), WildlifeObsPO::getHealthStatus, healthStatus)
                         .ge(observedFrom != null, WildlifeObsPO::getObservedAt, observedFrom)
                         .lt(observedTo != null, WildlifeObsPO::getObservedAt, observedTo)
-                        .orderByAsc(WildlifeObsPO::getId);
-                List<WildlifeObsPO> rows = obsMapper.selectList(wrapper);
-                long total = rows instanceof com.github.pagehelper.Page
-                        ? ((com.github.pagehelper.Page<?>) rows).getTotal()
-                        : rows.size();
-                List<WildlifeObs> content = rows.stream()
-                        .map(WildlifeObsPoConverter::toDomain)
-                        .collect(Collectors.toList());
-                return new PageResult<>(content, total, pageNum, pageSize);
-            } finally {
-                PageHelper.clearPage();
-            }
-        });
+                        .orderByAsc(WildlifeObsPO::getId)),
+                WildlifeObsPoConverter::toDomain));
     }
 
     @Override
     public Mono<ObsSummary> summarizeByTaskId(Long taskId) {
-        return blocking(() -> {
+        return BlockingJdbc.blocking(() -> {
             long obsCount = obsMapper.selectCount(Wrappers.<WildlifeObsPO>lambdaQuery()
                     .eq(WildlifeObsPO::getTaskId, taskId));
             long abnormalCount = obsMapper.selectCount(Wrappers.<WildlifeObsPO>lambdaQuery()
@@ -136,27 +121,5 @@ public class WildlifeObsRepositoryImpl implements WildlifeObsRepository {
         po.setId(IdUtil.getSnowflakeNextId());
         obsMapper.insert(po);
         return WildlifeObsPoConverter.toDomain(po);
-    }
-
-    private static boolean hasText(String value) {
-        return value != null && !value.isBlank();
-    }
-
-    /**
-     * 阻塞 DB 调用 → 响应式链路的桥接器：先取 Reactor Context 里的操作人，
-     * 再切到 boundedElastic 执行 JDBC，操作人放进 AuditContextHolder 供审计填充。
-     */
-    private <T> Mono<T> blocking(Supplier<T> supplier) {
-        return Mono.deferContextual(ctx -> {
-            String operator = ReactiveOperatorContext.getOperator(ctx);
-            return Mono.fromCallable(() -> {
-                AuditContextHolder.setOperator(operator);
-                try {
-                    return supplier.get();
-                } finally {
-                    AuditContextHolder.clear();
-                }
-            }).subscribeOn(Schedulers.boundedElastic());
-        });
     }
 }

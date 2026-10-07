@@ -131,8 +131,7 @@ public class MonitorStation extends BaseEntity {
         this.status = STATUS_SUSPENDED;
     }
 
-    /**
-     * 关闭：名下还有在册（ACTIVE）监测点时不允许关闭，等点位停测或撤掉后再关。
+    /** 关闭：名下还有在册（ACTIVE）监测点时不允许关闭，等点位停测或撤掉后再关。
      * 重复关闭是幂等空操作 —— 状态保持 CLOSED 不再翻动。
      *
      * @param activeSiteCount 名下在册监测点数量（由应用层查询后传入，领域层不直接访问仓储）
@@ -145,6 +144,14 @@ public class MonitorStation extends BaseEntity {
             throw new BizException("名下还有在册监测点，不能关闭");
         }
         this.status = STATUS_CLOSED;
+    }
+
+    /**
+     * 站是否在运行（ACTIVE）：只有运行中的站才接得住新点位、才派得进去任务。
+     * 停用/关闭的站都不行 —— 挂点位与派任务共用这一个谓词，判断只留一处。
+     */
+    public boolean isOperational() {
+        return STATUS_ACTIVE.equals(this.status);
     }
 
     private static String blankToNull(String value) {

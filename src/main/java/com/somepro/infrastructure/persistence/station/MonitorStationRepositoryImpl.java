@@ -1,33 +1,28 @@
 package com.somepro.infrastructure.persistence.station;
 
 import cn.hutool.core.util.IdUtil;
-import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
-import com.github.pagehelper.PageHelper;
 import com.somepro.common.exception.BizException;
 import com.somepro.domain.shared.model.PageResult;
 import com.somepro.domain.station.model.MonitorStation;
 import com.somepro.domain.station.repository.MonitorStationRepository;
-import com.somepro.infrastructure.config.ReactiveOperatorContext;
-import com.somepro.infrastructure.persistence.audit.AuditContextHolder;
 import com.somepro.infrastructure.persistence.station.converter.MonitorStationPoConverter;
 import com.somepro.infrastructure.persistence.station.po.MonitorStationPO;
 import com.somepro.infrastructure.persistence.support.BizNoGenerator;
+import com.somepro.infrastructure.persistence.support.BlockingJdbc;
+import com.somepro.infrastructure.persistence.support.Conditions;
+import com.somepro.infrastructure.persistence.support.PagingQuery;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Repository;
 import reactor.core.publisher.Mono;
-import reactor.core.scheduler.Schedulers;
 
 import java.time.LocalDate;
-import java.util.List;
-import java.util.function.Supplier;
-import java.util.stream.Collectors;
 
 /**
  * 监测站仓储适配器：用 MyBatis-Plus 实现领域仓储端口（基础设施层）。
  *
- * 约定同 DemoItemRepositoryImpl：所有 DB 调用经 {@link #blocking} 桥接到 boundedElastic；
- * PO 与领域对象在本类里经 {@link MonitorStationPoConverter} 互转，不泄到外层。
+ * 只负责站本身的存取：编号分配、改资料、分页；阻塞 JDBC 走 {@link BlockingJdbc}、
+ * 分页走 {@link PagingQuery}。PO 与领域对象经 MonitorStationPoConverter 互转，不泄到外层。
  *
  * 编号分配：stationNo 为空时按 ST-YYYY-NNNN 生成（序号取号段内最大值 +1，并发撞号由
  * {@link BizNoGenerator} 重试）；调用方指定编号时直接落库，撞唯一索引转成业务异常，
@@ -47,7 +42,7 @@ public class MonitorStationRepositoryImpl implements MonitorStationRepository {
 
     @Override
     public Mono<MonitorStation> create(MonitorStation station) {
-        return blocking(() -> {
+        return BlockingJdbc.blocking(() -> {
             if (station.getStationNo() != null && !station.getStationNo().isBlank()) {
                 try {
                     return doInsert(station, station.getStationNo().trim());
@@ -65,7 +60,7 @@ public class MonitorStationRepositoryImpl implements MonitorStationRepository {
 
     @Override
     public Mono<MonitorStation> update(MonitorStation station) {
-        return blocking(() -> {
+        return BlockingJdbc.blocking(() -> {
             MonitorStationPO po = MonitorStationPoConverter.toPo(station);
             stationMapper.updateById(po);
             return MonitorStationPoConverter.toDomain(po);
@@ -74,7 +69,7 @@ public class MonitorStationRepositoryImpl implements MonitorStationRepository {
 
     @Override
     public Mono<MonitorStation> findById(Long id) {
-        return blocking(() -> {
+        return BlockingJdbc.blocking(() -> {
             MonitorStationPO po = stationMapper.selectById(id);
             return po == null ? null : MonitorStationPoConverter.toDomain(po);
         });
@@ -83,28 +78,14 @@ public class MonitorStationRepositoryImpl implements MonitorStationRepository {
     @Override
     public Mono<PageResult<MonitorStation>> page(int pageNum, int pageSize,
                                                  String name, String level, String region, String status) {
-        return this.<PageResult<MonitorStation>>blocking(() -> {
-            try {
-                PageHelper.startPage(pageNum, pageSize);
-                LambdaQueryWrapper<MonitorStationPO> wrapper = Wrappers.<MonitorStationPO>lambdaQuery()
-                        .like(hasText(name), MonitorStationPO::getName, name)
-                        .eq(hasText(level), MonitorStationPO::getLevel, level)
-                        .like(hasText(region), MonitorStationPO::getRegion, region)
-                        .eq(hasText(status), MonitorStationPO::getStatus, status)
-                        .orderByAsc(MonitorStationPO::getId);
-                List<MonitorStationPO> rows = stationMapper.selectList(wrapper);
-                long total = rows instanceof com.github.pagehelper.Page
-                        ? ((com.github.pagehelper.Page<?>) rows).getTotal()
-                        : rows.size();
-                List<MonitorStation> content = rows.stream()
-                        .map(MonitorStationPoConverter::toDomain)
-                        .collect(Collectors.toList());
-                return new PageResult<>(content, total, pageNum, pageSize);
-            } finally {
-                // 分页参数靠 ThreadLocal 传递，必须清理，否则污染线程池里的下一次调用
-                PageHelper.clearPage();
-            }
-        });
+        return BlockingJdbc.blocking(() -> PagingQuery.page(pageNum, pageSize,
+                () -> stationMapper.selectList(Wrappers.<MonitorStationPO>lambdaQuery()
+                        .like(Conditions.hasText(name), MonitorStationPO::getName, name)
+                        .eq(Conditions.hasText(level), MonitorStationPO::getLevel, level)
+                        .like(Conditions.hasText(region), MonitorStationPO::getRegion, region)
+                        .eq(Conditions.hasText(status), MonitorStationPO::getStatus, status)
+                        .orderByAsc(MonitorStationPO::getId)),
+                MonitorStationPoConverter::toDomain));
     }
 
     /** 落库：雪花 id + 编号，审计字段由 MetaObjectHandler 填充。 */
@@ -114,27 +95,5 @@ public class MonitorStationRepositoryImpl implements MonitorStationRepository {
         po.setId(IdUtil.getSnowflakeNextId());
         stationMapper.insert(po);
         return MonitorStationPoConverter.toDomain(po);
-    }
-
-    private static boolean hasText(String value) {
-        return value != null && !value.isBlank();
-    }
-
-    /**
-     * 阻塞 DB 调用 → 响应式链路的桥接器：先取 Reactor Context 里的操作人，
-     * 再切到 boundedElastic 执行 JDBC，操作人放进 AuditContextHolder 供审计填充。
-     */
-    private <T> Mono<T> blocking(Supplier<T> supplier) {
-        return Mono.deferContextual(ctx -> {
-            String operator = ReactiveOperatorContext.getOperator(ctx);
-            return Mono.fromCallable(() -> {
-                AuditContextHolder.setOperator(operator);
-                try {
-                    return supplier.get();
-                } finally {
-                    AuditContextHolder.clear();
-                }
-            }).subscribeOn(Schedulers.boundedElastic());
-        });
     }
 }

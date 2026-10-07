@@ -3,13 +3,9 @@ package com.somepro.application.obs;
 import com.somepro.common.exception.BizException;
 import com.somepro.domain.obs.model.WildlifeObs;
 import com.somepro.domain.obs.repository.WildlifeObsRepository;
+import com.somepro.domain.obs.service.ObservationGuard;
 import com.somepro.domain.shared.model.PageResult;
-import com.somepro.domain.site.model.MonitorSite;
-import com.somepro.domain.site.repository.MonitorSiteRepository;
 import com.somepro.domain.species.model.Species;
-import com.somepro.domain.species.repository.SpeciesRepository;
-import com.somepro.domain.task.model.PatrolTask;
-import com.somepro.domain.task.repository.PatrolTaskRepository;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Mono;
 
@@ -19,12 +15,8 @@ import java.util.Optional;
 /**
  * 野生动物观测应用层：编排观测用例（录入、修改、查看、作废、条件分页）。
  *
- * 录入两道前置（缺一不可）：
- * - 任务得正在执行（IN_PROGRESS）：待执行还没开工、已完成账已冻结、已取消已销账的任务，
- *   都不再往底下录观测；
- * - 物种得在名录里且处在启用状态（ENABLED）：编码查不到的、名录里停用掉的，一律不收，
- *   不允许拿别的编码糊弄。
- * 另外点位得是库里还在册的（监测点被撤掉的不能往上挂）。
+ * 「能不能录」（任务正在执行、点位在册、物种在名录且启用）的取数与判断统一收在
+ * {@link ObservationGuard}，新录与改录（换点/换物种）都调它，本类只做用例编排。
  *
  * 保护级别快照：录入时照物种名录里该物种「当前写着的」级别抄一份进观测
  * （protection_level），抄进来就不跟着名录变；以后名录把级别调高调低，老观测仍是当初那份。
@@ -34,18 +26,12 @@ import java.util.Optional;
 public class WildlifeObsAppService {
 
     private final WildlifeObsRepository obsRepository;
-    private final PatrolTaskRepository taskRepository;
-    private final MonitorSiteRepository siteRepository;
-    private final SpeciesRepository speciesRepository;
+    private final ObservationGuard guard;
 
     public WildlifeObsAppService(WildlifeObsRepository obsRepository,
-                                 PatrolTaskRepository taskRepository,
-                                 MonitorSiteRepository siteRepository,
-                                 SpeciesRepository speciesRepository) {
+                                 ObservationGuard guard) {
         this.obsRepository = obsRepository;
-        this.taskRepository = taskRepository;
-        this.siteRepository = siteRepository;
-        this.speciesRepository = speciesRepository;
+        this.guard = guard;
     }
 
     /**
@@ -54,9 +40,9 @@ public class WildlifeObsAppService {
      */
     public Mono<WildlifeObs> record(Long taskId, Long siteId, String speciesCode, Integer individualCount,
                                     String healthStatus, LocalDateTime observedAt, String recorder) {
-        return requireOngoingTask(taskId)
-                .then(requireExistingSite(siteId))
-                .then(requireEnabledSpecies(speciesCode))
+        return guard.requireOngoingTask(taskId)
+                .then(guard.requireExistingSite(siteId))
+                .then(guard.requireEnabledSpecies(speciesCode))
                 .flatMap(species -> {
                     WildlifeObs obs = WildlifeObs.create(taskId, siteId, speciesCode,
                             species.getProtectionLevel(), individualCount, healthStatus, observedAt, recorder);
@@ -79,11 +65,11 @@ public class WildlifeObsAppService {
                     boolean speciesChanged = incomingCode != null
                             && !incomingCode.equals(obs.getSpeciesCode());
                     Mono<Species> speciesCheck = speciesChanged
-                            ? requireEnabledSpecies(incomingCode)
+                            ? guard.requireEnabledSpecies(incomingCode)
                             : Mono.empty();
                     // 物种没变时 speciesCheck 是空 Mono：用 Optional 兜成「无新级别」，
                     // 保证后续 flatMap 仍会执行（空 Mono 直接 flatMap 会把更新整个吞掉）
-                    return requireExistingSite(targetSiteId)
+                    return guard.requireExistingSite(targetSiteId)
                             .then(speciesCheck.map(Optional::of).defaultIfEmpty(Optional.empty()))
                             .flatMap(newSpecies -> {
                                 String snapshot = newSpecies.map(Species::getProtectionLevel).orElse(null);
@@ -114,46 +100,6 @@ public class WildlifeObsAppService {
                                                  LocalDateTime observedFrom, LocalDateTime observedTo) {
         return obsRepository.page(pageNum, pageSize, taskId, siteId,
                 normalizeCode(speciesCode), healthStatus, observedFrom, observedTo);
-    }
-
-    /** 任务必须存在且正在执行：待执行/已完成/已取消的任务都不再收新观测。 */
-    private Mono<PatrolTask> requireOngoingTask(Long taskId) {
-        if (taskId == null) {
-            return Mono.error(new BizException("巡护任务不能为空"));
-        }
-        return taskRepository.findById(taskId)
-                .switchIfEmpty(Mono.error(new BizException("巡护任务不存在")))
-                .flatMap(task -> {
-                    if (!PatrolTask.STATUS_IN_PROGRESS.equals(task.getStatus())) {
-                        return Mono.error(new BizException("只有正在执行的巡护任务才能录入观测"));
-                    }
-                    return Mono.just(task);
-                });
-    }
-
-    /** 点位必须存在（已撤掉/查不到的点不往上挂）；@TableLogic 自动过滤已删除点位。 */
-    private Mono<MonitorSite> requireExistingSite(Long siteId) {
-        if (siteId == null) {
-            return Mono.error(new BizException("监测点不能为空"));
-        }
-        return siteRepository.findById(siteId)
-                .switchIfEmpty(Mono.error(new BizException("监测点不存在")));
-    }
-
-    /** 物种必须在名录里且启用：编码查不到/停用的都不收。 */
-    private Mono<Species> requireEnabledSpecies(String speciesCode) {
-        String code = normalizeCode(speciesCode);
-        if (code == null) {
-            return Mono.error(new BizException("物种编码不能为空"));
-        }
-        return speciesRepository.findByCode(code)
-                .switchIfEmpty(Mono.error(new BizException("物种不在名录里，不能录入观测")))
-                .flatMap(species -> {
-                    if (!Species.STATUS_ENABLED.equals(species.getStatus())) {
-                        return Mono.error(new BizException("物种已在名录中停用，不能再录入观测"));
-                    }
-                    return Mono.just(species);
-                });
     }
 
     private static String normalizeCode(String speciesCode) {

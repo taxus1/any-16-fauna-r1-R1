@@ -97,6 +97,14 @@ public class Species extends BaseEntity {
         this.status = STATUS_DISABLED;
     }
 
+    /**
+     * 物种是否在名录且启用（ENABLED）：只有启用的物种才录得进新观测。
+     * 查不到/停用的都不收 —— 观测录入与改录共用这一个谓词，判断只留一处。
+     */
+    public boolean isEnabled() {
+        return STATUS_ENABLED.equals(this.status);
+    }
+
     private static String blankToNull(String value) {
         if (value == null || value.isBlank()) {
             return null;
